@@ -11,6 +11,7 @@ import sys
 import numpy as np
 from skimage import segmentation
 import torch.nn.init
+from osgeo import gdal
 
 use_cuda = torch.cuda.is_available()
 
@@ -62,7 +63,10 @@ class MyNet(nn.Module):
         return x
 
 # load image
-im = cv2.imread(args.input)
+gdst = gdal.Open(args.input)
+im = gdst.ReadAsArray()
+im = np.moveaxis(im, 0, -1)
+print('IMAGE SHAPE', im.shape)
 data = torch.from_numpy( np.array([im.transpose( (2, 0, 1) ).astype('float32')/255.]) )
 if use_cuda:
     data = data.cuda()
@@ -93,8 +97,9 @@ for batch_idx in range(args.maxIter):
     im_target = target.data.cpu().numpy()
     nLabels = len(np.unique(im_target))
     if args.visualize:
+        output_shape = im.shape[:-1] + (3,)
         im_target_rgb = np.array([label_colours[ c % 100 ] for c in im_target])
-        im_target_rgb = im_target_rgb.reshape( im.shape ).astype( np.uint8 )
+        im_target_rgb = im_target_rgb.reshape( output_shape ).astype( np.uint8 )
         cv2.imshow( "output", im_target_rgb )
         cv2.waitKey(10)
 
@@ -127,7 +132,19 @@ if not args.visualize:
     output = model( data )[ 0 ]
     output = output.permute( 1, 2, 0 ).contiguous().view( -1, args.nChannel )
     ignore, target = torch.max( output, 1 )
+    output_shape = im.shape[:-1] + (3,)
     im_target = target.data.cpu().numpy()
     im_target_rgb = np.array([label_colours[ c % 100 ] for c in im_target])
-    im_target_rgb = im_target_rgb.reshape( im.shape ).astype( np.uint8 )
-cv2.imwrite( "output.png", im_target_rgb )
+    im_target_rgb = im_target_rgb.reshape( output_shape ).astype( np.uint8 )
+
+def save_image(fpath, img, gdst):
+    driver = gdal.GetDriverByName('GTiff')
+    dst_gdst = driver.Create(fpath, xsize=img.shape[1], ysize=img.shape[0], bands=3, eType=gdal.GDT_Float32)
+    dst_gdst.SetGeoTransform(gdst.GetGeoTransform())
+    dst_gdst.SetProjection(gdst.GetProjection())
+    for i in range(3):
+        band = dst_gdst.GetRasterBand(i+1)
+        band.WriteArray(img[..., i])
+    dst_gdst = None
+
+save_image('output.tif', im_target_rgb, gdst)
